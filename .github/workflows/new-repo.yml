@@ -1,0 +1,79 @@
+# Repo factory: make a new public repo under samuelling with GitHub Pages
+# already on (main branch, root), so it shows up at https://linglab.org/<name>/.
+#
+# Ask for one by adding an empty file new-repos/<name> and pushing to main
+# (or run this workflow by hand with a name). Names are lowercase:
+# a-z, 0-9, dot, dash, underscore. The file may hold a one-line description.
+#
+# Needs the secret REPO_FACTORY_TOKEN: a fine-grained token for samuelling,
+# all repositories, with Administration and Pages set to read and write.
+name: New repo
+
+on:
+  push:
+    branches: [main]
+    paths: ['new-repos/**']
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'Repo name (lowercase)'
+        required: true
+      description:
+        description: 'One-line description (optional)'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  make:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.REPO_FACTORY_TOKEN }}
+      OWNER: samuelling
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Work out which repos to make
+        id: list
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            printf '%s\t%s\n' "${{ inputs.name }}" "${{ inputs.description }}" > todo.tsv
+          else
+            : > todo.tsv
+            git diff --name-only --diff-filter=A HEAD^ HEAD -- new-repos/ | while read -r f; do
+              n=$(basename "$f")
+              [ "$n" = "README.md" ] && continue
+              d=$(head -n1 "$f" 2>/dev/null | tr -d '\r')
+              printf '%s\t%s\n' "$n" "$d" >> todo.tsv
+            done
+          fi
+          cat todo.tsv
+
+      - name: Make them
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::REPO_FACTORY_TOKEN secret is missing"; exit 1
+          fi
+          fail=0
+          while IFS=$'\t' read -r name desc; do
+            [ -z "$name" ] && continue
+            if ! printf '%s' "$name" | grep -Eq '^[a-z0-9][a-z0-9._-]{0,99}$'; then
+              echo "::error::Bad name '$name' (lowercase letters, digits, . _ - only)"; fail=1; continue
+            fi
+            if gh repo view "$OWNER/$name" >/dev/null 2>&1; then
+              echo "$OWNER/$name already exists; leaving its contents alone"
+            else
+              gh repo create "$OWNER/$name" --public --add-readme ${desc:+--description "$desc"}
+              sleep 3
+            fi
+            # Pages from main, root. 409 means it's already on.
+            out=$(gh api -X POST "repos/$OWNER/$name/pages" \
+                    -f 'source[branch]=main' -f 'source[path]=/' 2>&1) \
+              || echo "$out" | grep -qi 'already' \
+              || { echo "::error::Pages for $name: $out"; fail=1; continue; }
+            echo "- \`$OWNER/$name\` → https://linglab.org/$name/" >> "$GITHUB_STEP_SUMMARY"
+          done < todo.tsv
+          exit $fail
